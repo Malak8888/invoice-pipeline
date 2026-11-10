@@ -1,0 +1,136 @@
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,INTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  spark:
+    build: .
+    image: invoice-spark:latest
+    container_name: spark
+    user: root
+    depends_on:
+      - kafka
+      - mlflow
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./streaming:/opt/streaming
+      - ./ml:/opt/ml
+    command: sleep infinity
+
+  namenode:
+    image: apache/hadoop:3.3.6
+    container_name: namenode
+    hostname: namenode
+    user: root
+    command: ["/bin/bash", "-c", "[ -d /tmp/hadoop-root/dfs/name/current ] || hdfs namenode -format -nonInteractive; hdfs namenode"]   
+    environment:
+      CORE-SITE.XML_fs.defaultFS: hdfs://namenode:9000
+      HDFS-SITE.XML_dfs.replication: "1"
+      HDFS-SITE.XML_dfs.permissions.enabled: "false"
+    ports:
+      - "9870:9870"
+    volumes:
+      - namenode_data:/tmp/hadoop-root/dfs/name
+
+  datanode:
+    image: apache/hadoop:3.3.6
+    container_name: datanode
+    hostname: datanode
+    user: root
+    command: ["hdfs", "datanode"]
+    depends_on:
+      - namenode
+    environment:
+      CORE-SITE.XML_fs.defaultFS: hdfs://namenode:9000
+      HDFS-SITE.XML_dfs.replication: "1"
+      HDFS-SITE.XML_dfs.permissions.enabled: "false"
+    volumes:
+      - datanode_data:/tmp/hadoop-root/dfs/data
+
+  minio:
+    image: bitnamilegacy/minio:latest
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+      MINIO_DEFAULT_BUCKETS: mlflow
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/bitnami/minio/data
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    image: invoice-mlflow:latest
+    container_name: mlflow
+    depends_on:
+      - minio
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin123
+    command:
+      - sh
+      - -c
+      - >-
+        python /init_bucket.py &&
+        mlflow server --host 0.0.0.0 --port 5000
+        --backend-store-uri sqlite:////mlflow/mlflow.db
+        --artifacts-destination s3://mlflow
+        --serve-artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: invoice-airflow:latest
+    container_name: airflow
+    user: "0:0"
+    depends_on:
+      - spark
+      - namenode
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
+    command: standalone
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - /var/run/docker.sock:/var/run/docker.sock
+  serving:
+    build: ./serving
+    image: invoice-serving:latest
+    container_name: serving
+    depends_on:
+      - mlflow
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_URI: models:/invoice_late_payment_sk@staging
+    ports:
+      - "8000:8000"
+
+volumes:
+  namenode_data:
+  datanode_data:
+  minio_data:
+  mlflow_data:
