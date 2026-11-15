@@ -23,7 +23,7 @@ spec:
             - name: MLFLOW_TRACKING_URI
               value: http://mlflow:5000
             - name: MODEL_URI
-              value: models:/invoice_late_payment_sk@staging
+              value: models:/invoice_late_payment_sk@production
           readinessProbe:
             httpGet:
               path: /health
